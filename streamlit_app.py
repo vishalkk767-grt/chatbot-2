@@ -1,56 +1,175 @@
 import streamlit as st
 from openai import OpenAI
+import hashlib
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+# ---------------- PAGE CONFIG ----------------
+st.set_page_config(
+    page_title="Voice AI Assistant",
+    page_icon="🎙️",
+    layout="centered"
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+st.title("🎙️ Voice AI Assistant")
+st.caption("Your personal AI assistant")
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# ---------------- API KEY ----------------
+api_key = st.text_input(
+    "OpenAI API Key",
+    type="password",
+    placeholder="Enter your API key"
+)
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
+if not api_key:
+    st.info("Please enter your OpenAI API key to continue.")
+    st.stop()
+
+client = OpenAI(api_key=api_key)
+
+# ---------------- SESSION STATE ----------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "last_audio_hash" not in st.session_state:
+    st.session_state.last_audio_hash = None
+
+# ---------------- SETTINGS ----------------
+with st.sidebar:
+    st.header("⚙️ Settings")
+    voice_enabled = st.toggle("Enable AI Voice", value=True)
+
+    if st.button("Clear Chat"):
         st.session_state.messages = []
+        st.session_state.last_audio_hash = None
+        st.rerun()
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    st.caption("Powered by OpenAI")
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+# ---------------- AI RESPONSE ----------------
+def get_ai_response(prompt):
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    st.session_state.messages.append({
+        "role": "user",
+        "content": prompt
+    })
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful personal voice assistant. "
+                        "Understand Hindi, English and Hinglish. "
+                        "Give clear and friendly answers."
+                    )
+                }
+            ] + st.session_state.messages,
+            temperature=0.7
         )
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        answer = response.choices[0].message.content
+
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": answer
+        })
+
+        return answer
+
+    except Exception as e:
+        st.error(f"OpenAI API Error: {e}")
+        st.session_state.messages.pop()
+        return None
+
+
+# ---------------- TEXT TO SPEECH ----------------
+def speak_response(text):
+
+    try:
+        audio = client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=text
+        )
+
+        st.audio(audio.content, format="audio/mp3")
+
+    except Exception as e:
+        st.warning(f"Voice generation error: {e}")
+
+
+# ---------------- DISPLAY CHAT ----------------
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+
+# ---------------- TEXT INPUT ----------------
+prompt = st.chat_input("Ask me anything...")
+
+if prompt:
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            answer = get_ai_response(prompt)
+
+        if answer:
+            st.markdown(answer)
+
+            if voice_enabled:
+                speak_response(answer)
+
+
+# ---------------- VOICE INPUT ----------------
+st.divider()
+st.subheader("🎤 Talk to your AI Assistant")
+
+audio_file = st.audio_input("Tap to record your voice")
+
+if audio_file:
+
+    audio_bytes = audio_file.getvalue()
+    audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+
+    if audio_hash != st.session_state.last_audio_hash:
+
+        st.session_state.last_audio_hash = audio_hash
+
+        try:
+            with st.spinner("Understanding your voice..."):
+
+                transcription = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=(
+                        "recording.wav",
+                        audio_bytes,
+                        "audio/wav"
+                    )
+                )
+
+                voice_prompt = transcription.text
+
+            if voice_prompt.strip():
+
+                st.success(f"You said: {voice_prompt}")
+
+                with st.chat_message("user"):
+                    st.markdown(voice_prompt)
+
+                with st.chat_message("assistant"):
+                    with st.spinner("AI is thinking..."):
+                        answer = get_ai_response(voice_prompt)
+
+                    if answer:
+                        st.markdown(answer)
+
+                        if voice_enabled:
+                            speak_response(answer)
+
+        except Exception as e:
+            st.error(f"Voice input error: {e}")
+
+st.caption("Made with Python, Streamlit and OpenAI")
